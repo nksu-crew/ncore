@@ -1,9 +1,9 @@
 use std::ffi::c_void;
 use std::sync::OnceLock;
 
+use jni::EnvUnowned;
 use jni::objects::{JObject, JString};
 use jni::sys::{JNI_VERSION_1_6, jboolean, jint, jlong};
-use jni::{EnvUnowned, Outcome};
 use log::{error, info};
 
 use crate::ctl::{FmacCtl, FmacShm, KernelOp, invoke};
@@ -13,20 +13,27 @@ use crate::utils::jstring_to_string;
 static SHM: OnceLock<FmacShm> = OnceLock::new();
 static CTL: OnceLock<FmacCtl> = OnceLock::new();
 
+fn get_ctl() -> Option<&'static FmacCtl> {
+    CTL.get()
+}
+
 macro_rules! jni_fn {
     (fn $name:ident($($arg:ident: $ty:ty),*) -> $ret:ty { $ctl:ident => $body:expr }) => {
         #[unsafe(no_mangle)]
-        pub extern "system" fn $name(
+        pub unsafe extern "system" fn $name(
             _env: EnvUnowned,
             _thiz: JObject,
             $($arg: $ty),*
         ) -> $ret {
-            let Some($ctl) = get_ctl() else { return -1 };
+            let Some($ctl) = get_ctl() else {
+                error!("{}: CTL not initialized", stringify!($name));
+                return -1 as _;
+            };
             match $body {
                 Ok(v) => v as $ret,
                 Err(e) => {
                     error!("{}: {e}", stringify!($name));
-                    -1
+                    -1 as _
                 }
             }
         }
@@ -36,35 +43,37 @@ macro_rules! jni_fn {
 macro_rules! jni_fn_env {
     (fn $name:ident($($arg:ident: $ty:ty),*) -> $ret:ty { $env:ident, $ctl:ident => $body:expr }) => {
         #[unsafe(no_mangle)]
-        pub extern "system" fn $name(
-            mut env: EnvUnowned,
+        pub unsafe extern "system" fn $name(
+            mut unowned_env: EnvUnowned,
             _thiz: JObject,
             $($arg: $ty),*
         ) -> $ret {
-            let Some($ctl) = get_ctl() else { return -1 };
-            let outcome: Outcome<$ret, jni::errors::Error> = env.with_env(|$env| {
+            let Some($ctl) = get_ctl() else {
+                error!("{}: CTL not initialized", stringify!($name));
+                return -1 as _;
+            };
+            let outcome: jni::Outcome<$ret, jni::errors::Error> = unowned_env.with_env(|$env| {
                 match $body {
                     Ok(v) => Ok(v as $ret),
                     Err(e) => {
                         error!("{}: {e}", stringify!($name));
-                        Ok(-1)
+                        Ok(-1 as _)
                     }
                 }
-            }).into_outcome();
+            }).into_outcome().into();
             match outcome {
-                Outcome::Ok(v) => v,
-                _ => -1,
+                jni::Outcome::Ok(v) => v,
+                _ => -1 as _,
             }
         }
     };
 }
 
-fn get_ctl() -> Option<&'static FmacCtl> {
-    CTL.get()
-}
-
 #[unsafe(no_mangle)]
-pub extern "system" fn JNI_OnLoad(_vm: *mut jni::sys::JavaVM, _reserved: *mut c_void) -> jint {
+pub unsafe extern "system" fn JNI_OnLoad(
+    _vm: *mut jni::sys::JavaVM,
+    _reserved: *mut c_void,
+) -> jint {
     setup_logging();
     if let Err(e) = invoke(KernelOp::Authenticate) {
         error!("ctl authenticate: {e}");
@@ -74,7 +83,7 @@ pub extern "system" fn JNI_OnLoad(_vm: *mut jni::sys::JavaVM, _reserved: *mut c_
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_me_nekosu_aqnya_ncore_ctl(
+pub unsafe extern "system" fn Java_me_nekosu_aqnya_ncore_ctl(
     _env: EnvUnowned,
     _thiz: JObject,
     value: jint,
@@ -88,26 +97,42 @@ pub extern "system" fn Java_me_nekosu_aqnya_ncore_ctl(
 
     if let Err(e) = invoke(op) {
         error!("ctl({op:?}): {e}");
+        return -1;
     }
 
-    match value {
-        1 => {
-            if let Err(e) = FmacShm::from_proc().map(|shm| SHM.set(shm)) {
-                error!("scan shm fd: {e:?}");
+    match op {
+        KernelOp::Authenticate => {
+            if SHM.get().is_none() {
+                match FmacShm::from_proc() {
+                    Ok(shm) => {
+                        let _ = SHM.set(shm);
+                    }
+                    Err(e) => error!("scan shm fd: {e}"),
+                }
             }
         }
-        3 => {
-            if let Err(e) = FmacCtl::from_proc().map(|c| {
-                info!("ctlfd acquired: {}", c.as_raw_fd());
-                CTL.set(c)
-            }) {
-                error!("scan ctl fd: {e:?}");
+        KernelOp::Ioctl => {
+            if CTL.get().is_none() {
+                match FmacCtl::from_proc() {
+                    Ok(c) => {
+                        info!("ctlfd acquired: {}", c.as_raw_fd());
+                        let _ = CTL.set(c);
+                    }
+                    Err(e) => error!("scan ctl fd: {e}"),
+                }
             }
         }
         _ => {}
     }
 
-    if SHM.get().is_none() { -1 } else { 0 }
+    if op == KernelOp::Authenticate && SHM.get().is_none() {
+        return -1;
+    }
+    if op == KernelOp::Ioctl && CTL.get().is_none() {
+        return -1;
+    }
+
+    0
 }
 
 jni_fn_env!(fn Java_me_nekosu_aqnya_ncore_setProfile(uid: jint, caps: jlong, domain_str: JString, namespace: jint) -> jint {
@@ -117,12 +142,12 @@ jni_fn_env!(fn Java_me_nekosu_aqnya_ncore_setProfile(uid: jint, caps: jlong, dom
     }
 });
 
-jni_fn_env!(fn Java_me_nekosu_aqnya_ncore_addSelinuxRule(src: JString, tgt: JString, cls: JString, perm: JString, effect: jint, invert: jboolean) -> jint {
+jni_fn_env!(fn Java_me_nekosu_aqnya_ncore_addSelinuxRule(src_s: JString, tgt_s: JString, cls_s: JString, perm_s: JString, effect: jint, invert: jboolean) -> jint {
     env, ctl => {
-        let src  = jstring_to_string(env, &src);
-        let tgt  = jstring_to_string(env, &tgt);
-        let cls  = jstring_to_string(env, &cls);
-        let perm = jstring_to_string(env, &perm);
+        let src  = jstring_to_string(env, &src_s);
+        let tgt  = jstring_to_string(env, &tgt_s);
+        let cls  = jstring_to_string(env, &cls_s);
+        let perm = jstring_to_string(env, &perm_s);
         ctl.add_selinux_rule(&src, &tgt, &cls, &perm, effect, invert).map(|_| 0)
     }
 });
@@ -152,26 +177,10 @@ jni_fn!(fn Java_me_nekosu_aqnya_ncore_delCap(uid: jint) -> jint {
 });
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_me_nekosu_aqnya_ncore_addRule(
+pub unsafe extern "system" fn Java_me_nekosu_aqnya_ncore_helloLog(
     _env: EnvUnowned,
     _thiz: JObject,
-    _path: JString,
-    _status_bits: jlong,
-) -> jint {
-    0
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_me_nekosu_aqnya_ncore_delRule(
-    _env: EnvUnowned,
-    _thiz: JObject,
-    _path: JString,
-) -> jint {
-    0
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_me_nekosu_aqnya_ncore_helloLog(_env: EnvUnowned, _thiz: JObject) {
-    log::debug!("Hello, this is a log from Rust!");
-    info!("ncore build-as lib");
+) {
+    log::debug!("Hello from Rust!");
+    info!("ncore library initialized");
 }

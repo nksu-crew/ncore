@@ -10,8 +10,8 @@ pub mod sys {
     include!(concat!(env!("OUT_DIR"), "/fmac_bindings.rs"));
 }
 
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::os::fd::{AsFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::io::AsRawFd;
 
 use rustix::event::{EventfdFlags, PollFd, PollFlags, eventfd};
 use rustix::io::{Errno, read};
@@ -23,14 +23,11 @@ use crate::utils::{scan_fd_by_link, write_str64};
 use self::ioctl::*;
 use self::sys::{fmac_sepolicy_rule, fmac_uid_cap, nksu_profile_data};
 
-unsafe fn raw_ioctl<T>(fd: RawFd, cmd: u32, arg: *mut T) -> Result<()> {
-    // libc::ioctl request type is Ioctl = c_int on Android/aarch64
-    let ret = unsafe { libc::ioctl(fd, cmd as libc::c_int, arg as *mut libc::c_void) };
+fn raw_ioctl<T>(fd: impl AsFd, cmd: u32, arg: *mut T) -> Result<()> {
+    let ret = unsafe { libc::ioctl(fd.as_fd().as_raw_fd(), cmd as _, arg) };
     if ret < 0 {
-        Err(Error::Ioctl {
-            cmd,
-            errno: Errno::from_raw_os_error(unsafe { *libc::__errno() }),
-        })
+        let errno = Errno::from_raw_os_error(unsafe { *libc::__errno() });
+        Err(Error::Ioctl { cmd, errno })
     } else {
         Ok(())
     }
@@ -48,7 +45,7 @@ pub fn invoke(op: KernelOp) -> Result<usize> {
     let nr = op as u32 + 200;
     let ret = unsafe { libc::prctl(nr as libc::c_int, 0, 0, 0, 0) };
     if ret < 0 {
-        let errno = unsafe { *libc::__errno() };
+        let errno = Errno::from_raw_os_error(unsafe { *libc::__errno() });
         Err(Error::Prctl { op: nr, errno })
     } else {
         Ok(ret as usize)
@@ -59,32 +56,30 @@ pub struct FmacCtl(OwnedFd);
 
 impl FmacCtl {
     pub fn from_proc() -> Result<Self> {
-        scan_fd_by_link("[fmac_ctl]").map(|fd| Self(unsafe { OwnedFd::from_raw_fd(fd) }))
+        scan_fd_by_link("[fmac_ctl]").map(|fd| unsafe { Self(OwnedFd::from_raw_fd(fd)) })
     }
 
     pub fn from_fd(fd: OwnedFd) -> Self {
         Self(fd)
     }
+
     pub fn as_raw_fd(&self) -> RawFd {
-        self.0.as_raw_fd()
-    }
-    fn raw(&self) -> RawFd {
         self.0.as_raw_fd()
     }
 
     pub fn add_uid(&self, uid: u32) -> Result<()> {
-        let mut v = uid as libc::c_int;
-        unsafe { raw_ioctl(self.raw(), IOC_ADD_UID, &mut v) }
+        let mut v = uid as i32;
+        raw_ioctl(&self.0, IOC_ADD_UID, &mut v)
     }
 
     pub fn del_uid(&self, uid: u32) -> Result<()> {
-        let mut v = uid as libc::c_int;
-        unsafe { raw_ioctl(self.raw(), IOC_DEL_UID, &mut v) }
+        let mut v = uid as i32;
+        raw_ioctl(&self.0, IOC_DEL_UID, &mut v)
     }
 
     pub fn has_uid(&self, uid: u32) -> Result<bool> {
-        let mut v = uid as libc::c_int;
-        unsafe { raw_ioctl(self.raw(), IOC_HAS_UID, &mut v) }?;
+        let mut v = uid as i32;
+        raw_ioctl(&self.0, IOC_HAS_UID, &mut v)?;
         Ok(v != 0)
     }
 
@@ -94,7 +89,7 @@ impl FmacCtl {
             caps,
             ..Default::default()
         };
-        unsafe { raw_ioctl(self.raw(), IOC_SET_CAP, &mut uc) }
+        raw_ioctl(&self.0, IOC_SET_CAP, &mut uc)
     }
 
     pub fn get_cap(&self, uid: u32) -> Result<u64> {
@@ -103,7 +98,7 @@ impl FmacCtl {
             caps: 0,
             ..Default::default()
         };
-        unsafe { raw_ioctl(self.raw(), IOC_GET_CAP, &mut uc) }?;
+        raw_ioctl(&self.0, IOC_GET_CAP, &mut uc)?;
         Ok(uc.caps)
     }
 
@@ -113,7 +108,7 @@ impl FmacCtl {
             caps: 0,
             ..Default::default()
         };
-        unsafe { raw_ioctl(self.raw(), IOC_DEL_CAP, &mut uc) }
+        raw_ioctl(&self.0, IOC_DEL_CAP, &mut uc)
     }
 
     pub fn set_profile(&self, uid: u32, caps: u64, domain: &str, namespace: i32) -> Result<()> {
@@ -124,7 +119,7 @@ impl FmacCtl {
             ..Default::default()
         };
         write_str64(&mut p.selinux_domain, domain);
-        unsafe { raw_ioctl(self.raw(), IOC_SET_PROFILE, &mut p) }
+        raw_ioctl(&self.0, IOC_SET_PROFILE, &mut p)
     }
 
     pub fn add_selinux_rule(
@@ -145,7 +140,7 @@ impl FmacCtl {
         write_str64(&mut r.tgt, tgt);
         write_str64(&mut r.cls, cls);
         write_str64(&mut r.perm, perm);
-        unsafe { raw_ioctl(self.raw(), IOC_SEL_ADD_RULE, &mut r) }
+        raw_ioctl(&self.0, IOC_SEL_ADD_RULE, &mut r)
     }
 }
 
@@ -153,15 +148,17 @@ pub struct FmacShm(OwnedFd);
 
 impl FmacShm {
     pub fn from_proc() -> Result<Self> {
-        scan_fd_by_link("[fmac_shm]").map(|fd| Self(unsafe { OwnedFd::from_raw_fd(fd) }))
+        scan_fd_by_link("[fmac_shm]").map(|fd| unsafe { Self(OwnedFd::from_raw_fd(fd)) })
     }
 
     pub fn from_fd(fd: OwnedFd) -> Self {
         Self(fd)
     }
+
     pub fn as_fd(&self) -> BorrowedFd<'_> {
         self.0.as_fd()
     }
+
     pub fn as_raw_fd(&self) -> RawFd {
         self.0.as_raw_fd()
     }
@@ -179,11 +176,8 @@ impl KernelEvent {
     pub fn wait(&self) -> Result<u64> {
         loop {
             let mut pfd = [PollFd::new(&self.0, PollFlags::IN)];
-            match rustix::event::poll(&mut pfd, None) {
-                Err(Errno::INTR) => continue,
-                Err(e) => return Err(Error::Poll(e)),
-                Ok(_) => {}
-            }
+            rustix::event::poll(&mut pfd, None).map_err(Error::Poll)?;
+
             let mut buf = [0u8; 8];
             match read(&self.0, &mut buf) {
                 Ok(8) => return Ok(u64::from_ne_bytes(buf)),
@@ -193,18 +187,18 @@ impl KernelEvent {
         }
     }
 
-    /// Returns `None` on timeout, `Some(val)` on event.
     pub fn wait_timeout(&self, timeout_ms: i64) -> Result<Option<u64>> {
         let ts = Timespec {
-            tv_sec: timeout_ms / 1000,
-            tv_nsec: (timeout_ms % 1000) * 1_000_000,
+            tv_sec: (timeout_ms / 1000) as _,
+            tv_nsec: ((timeout_ms % 1000) * 1_000_000) as _,
         };
         let mut pfd = [PollFd::new(&self.0, PollFlags::IN)];
         match rustix::event::poll(&mut pfd, Some(&ts)) {
-            Err(Errno::INTR) | Ok(0) => return Ok(None),
+            Ok(0) | Err(Errno::INTR) => return Ok(None),
             Err(e) => return Err(Error::Poll(e)),
             Ok(_) => {}
         }
+
         let mut buf = [0u8; 8];
         match read(&self.0, &mut buf) {
             Ok(8) => Ok(Some(u64::from_ne_bytes(buf))),
@@ -216,6 +210,7 @@ impl KernelEvent {
     pub fn as_fd(&self) -> BorrowedFd<'_> {
         self.0.as_fd()
     }
+
     pub fn as_raw_fd(&self) -> RawFd {
         self.0.as_raw_fd()
     }

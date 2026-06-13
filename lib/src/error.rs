@@ -4,15 +4,15 @@ use rustix::io::Errno;
 pub enum Error {
     #[error("ioctl({cmd:#010x}): {errno}")]
     Ioctl { cmd: u32, errno: Errno },
-    #[error("prctl(op={op}): errno={errno}")]
-    Prctl { op: u32, errno: i32 },
-    #[error("fd not found: '{0}'")]
-    FdNotFound(&'static str),
-    #[error("eventfd: {0}")]
+    #[error("prctl(op={op}): {errno}")]
+    Prctl { op: u32, errno: Errno },
+    #[error("fd not found for target: '{0}'")]
+    FdNotFound(String),
+    #[error("eventfd error: {0}")]
     EventFd(Errno),
-    #[error("poll: {0}")]
+    #[error("poll error: {0}")]
     Poll(Errno),
-    #[error("read eventfd: {0}")]
+    #[error("read error: {0}")]
     Read(Errno),
 }
 
