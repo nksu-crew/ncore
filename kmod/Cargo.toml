@@ -4,6 +4,5 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-elf = "0.8.0"
-libc = "0.2.186"
+goblin = "0.10.7"
 rustix = { version = "1.1.4", features = ["system"] }

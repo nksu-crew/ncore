@@ -3,9 +3,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use elf::ElfBytes;
-use elf::abi::{SHN_ABS, SHN_UNDEF};
-use elf::endian::NativeEndian;
+use goblin::elf::{Elf, section_header};
 
 const KPTR_PATH: &str = "/proc/sys/kernel/kptr_restrict";
 
@@ -103,74 +101,57 @@ fn parse_kallsyms() -> io::Result<HashMap<String, u64>> {
 }
 
 fn patch_and_load(data: &mut Vec<u8>, ksyms: &HashMap<String, u64>) -> Result<(), String> {
-    let modifications = {
-        let elf_file = ElfBytes::<NativeEndian>::minimal_parse(data.as_slice())
-            .map_err(|e| format!("failed to parse ELF: {}", e))?;
+    let elf = Elf::parse(data).map_err(|e| format!("failed to parse ELF: {}", e))?;
 
-        let (symtab, strtab) = elf_file
-            .symbol_table()
-            .map_err(|e| format!("failed to get symbol table: {}", e))?
-            .ok_or("no symbol table found")?;
+    let symtab = &elf.syms;
+    let strtab = &elf.strtab;
 
-        let symtab_header = elf_file
-            .section_header_by_name(".symtab")
-            .map_err(|e| format!("failed to find .symtab section: {}", e))?
-            .ok_or(".symtab section not found")?;
+    let symtab_section = elf
+        .section_headers
+        .iter()
+        .find(|sh| elf.shdr_strtab.get_at(sh.sh_name) == Some(".symtab"))
+        .ok_or(".symtab section not found")?;
 
-        let symtab_base_offset = symtab_header.sh_offset as usize;
-        let sym_entry_size = symtab_header.sh_entsize as usize;
+    let symtab_offset = symtab_section.sh_offset as usize;
+    let sym_entry_size = symtab_section.sh_entsize as usize;
 
-        assert_eq!(sym_entry_size, 24, "unexpected Elf64_Sym size");
+    if !elf.is_64 {
+        return Err("ELF32 unsupported".into());
+    }
 
-        let mut nbuf = String::new();
-        let mut mods: Vec<(usize, u64)> = Vec::new();
-        let mut missing_symbols = Vec::new();
+    let mut nbuf = String::new();
+    let mut modifications = Vec::new();
+    let mut missing_symbols = Vec::new();
 
-        for (i, sym) in symtab.iter().enumerate() {
-            if sym.st_shndx != SHN_UNDEF || sym.st_name == 0 {
-                continue;
-            }
-            let raw_name = strtab
-                .get(sym.st_name as usize)
-                .map_err(|e| format!("failed to get symbol name: {}", e))?;
-            let name = normalize_symbol(raw_name, &mut nbuf);
-
-            match ksyms.get(name) {
-                Some(&addr) => {
-                    if addr == 0 {
-                        eprintln!("Warning: symbol {} has address 0", name);
-                    }
-                    eprintln!("Patching symbol {} -> 0x{:x}", name, addr);
-                    mods.push((symtab_base_offset + i * sym_entry_size, addr));
-                }
-                None => {
-                    missing_symbols.push(name.to_owned());
-                }
-            }
+    for (i, sym) in symtab.iter().enumerate() {
+        if sym.st_shndx != section_header::SHN_UNDEF as usize || sym.st_name == 0 {
+            continue;
         }
 
-        if !missing_symbols.is_empty() {
-            return Err(format!("missing symbols: {}", missing_symbols.join(", ")));
+        let raw_name = strtab.get_at(sym.st_name).ok_or("failed to get string")?;
+        let name = normalize_symbol(raw_name, &mut nbuf);
+
+        if let Some(&addr) = ksyms.get(name) {
+            println!("Patching symbol {} -> 0x{:x}", name, addr);
+            modifications.push((symtab_offset + i * sym_entry_size, addr));
+        } else {
+            missing_symbols.push(name.to_owned());
         }
+    }
 
-        mods
-    };
+    if !missing_symbols.is_empty() {
+        return Err(format!("missing symbols: {}", missing_symbols.join(", ")));
+    }
 
-    // Elf64_Sym layout (LE):
-    //   +0  st_name  u32
-    //   +4  st_info  u8
-    //   +5  st_other u8
-    //   +6  st_shndx u16
-    //   +8  st_value u64
-    //   +16 st_size  u64
-    for (sym_offset, addr) in modifications {
+    for (offset, addr) in modifications {
         let entry = data
-            .get_mut(sym_offset..sym_offset + 24)
-            .ok_or_else(|| format!("symbol offset {} out of bounds", sym_offset))?;
+            .get_mut(offset..offset + 24)
+            .ok_or_else(|| format!("symbol offset {} out of bounds", offset))?;
 
-        entry[6..8].copy_from_slice(&(SHN_ABS as u16).to_le_bytes());
+        entry[6..8].copy_from_slice(&(section_header::SHN_ABS as u16).to_le_bytes());
         entry[8..16].copy_from_slice(&addr.to_le_bytes());
     }
+
     rustix::system::init_module(data, c"").map_err(|e| e.to_string())
 }
 
