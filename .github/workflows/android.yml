@@ -8,25 +8,31 @@ on:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
-    - name: build libncore
-      run: |
-           curl -OL https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz
-           tar -xvf zig-x86_64-linux-0.15.2.tar.xz
-           ./zig-x86_64-linux-0.15.2/zig build -Dtarget=aarch64-linux-android -Doptimize=ReleaseSafe
-       
-    - name: Upload lib
-      uses: actions/upload-artifact@v4
-      with:
-        name: libncore
-        path: zig-out/lib/*.so
+      - uses: actions/checkout@v5
 
-    - name: Upload exe
-      uses: actions/upload-artifact@v4
-      with:
-        name: ncore
-        path: zig-out/bin/*
+      - name: Install Rust target
+        run: |
+          rustup target add aarch64-linux-android
+
+      - name: Build
+        env:
+          CC_aarch64_linux_android: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
+        run: |
+          cargo build --release --target aarch64-linux-android
+
+      - name: Upload library
+        uses: actions/upload-artifact@v4
+        with:
+          name: libncore
+          path: target/aarch64-linux-android/release/*.so
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: ncore
+          path: |
+            target/aarch64-linux-android/release/ncore
