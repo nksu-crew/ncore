@@ -449,9 +449,13 @@ name = "libncore"
 version = "0.1.0"
 dependencies = [
  "android-logd-logger",
+ "bindgen",
  "env_logger 0.11.10",
  "jni",
+ "libc",
  "log",
+ "rustix",
+ "thiserror",
 ]
 
 [[package]]
