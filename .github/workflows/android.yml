@@ -12,6 +12,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib
 
       - name: Install Rust target
         run: |
