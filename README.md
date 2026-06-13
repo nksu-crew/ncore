@@ -1,6 +1,6 @@
 This project is part of the Nekosu project suite.
 
-[![GitHub License](https://img.shields.io/github/license/FMAC-Team/ncore?logo=gnu)](/LICENSE)
+[![GitHub License](https://img.shields.io/github/license/nksu-crew/ncore?logo=gnu)](/LICENSE)
 ---
 
 ## License
