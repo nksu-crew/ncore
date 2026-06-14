@@ -1,6 +1,7 @@
 use boot;
 use clap::{Parser, Subcommand};
 use kmod;
+use modules;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -136,8 +137,7 @@ fn handle_boot_command(command: BootCommands) -> anyhow::Result<()> {
 fn handle_mod_command(command: ModCommands) -> anyhow::Result<()> {
     match command {
         ModCommands::Show => {
-            // TODO: 实现显示所有模块
-            println!("TODO: Show all installed modules");
+            modules::list::list_modules();
             Ok(())
         }
         ModCommands::Run => {
