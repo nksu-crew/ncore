@@ -12,6 +12,7 @@ pub mod utils;
 
 use crate::ctl::{FmacCtl, FmacShm, KernelOp, invoke};
 use crate::logging::setup_logging;
+use crate::utils::scan_fd_by_link;
 
 static SHM: OnceLock<FmacShm> = OnceLock::new();
 static CTL: OnceLock<FmacCtl> = OnceLock::new();
@@ -37,6 +38,11 @@ pub unsafe extern "C" fn ncore_init() -> c_int {
     }
     info!("ncore initialized via Flutter FFI");
     0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ncore_install() -> bool {
+    scan_fd_by_link("[fmac_ctl]").is_ok()
 }
 
 #[unsafe(no_mangle)]
